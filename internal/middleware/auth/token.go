@@ -21,7 +21,6 @@ var (
 func TokenAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.GetHeader("Authorization")
-		println("token-----: ", token)
 		if token == "" {
 			response.FailMsg(c, response.Unauthorized, "Authorization header is required")
 			c.Abort()

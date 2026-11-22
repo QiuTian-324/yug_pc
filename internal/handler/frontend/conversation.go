@@ -1,6 +1,9 @@
 package frontend
 
 import (
+	"errors"
+	"net/http"
+
 	"FastGo/internal/handler"
 	"FastGo/internal/handler/dto"
 	"FastGo/internal/router"
@@ -59,11 +62,26 @@ func (h *ConversationHandler) SetPinMute(c *gin.Context) {
 		response.FailMsg(c, response.InvalidParams, validator.TranslateError(err))
 		return
 	}
-	if err := h.ConversationService.SetPinMute(c.GetUint("user_id"), req); err != nil {
+	if req.IsPinned == nil && req.IsMuted == nil {
+		response.FailMsg(c, response.InvalidParams, "is_pinned 或 is_muted 至少需要传一个")
+		return
+	}
+
+	result, err := h.ConversationService.SetPinMute(c.GetUint("user_id"), req)
+	if errors.Is(err, service.ErrConversationNotFound) {
+		response.FailMsg(c, response.NotFound, err.Error())
+		return
+	}
+	if err != nil {
 		response.FailMsg(c, response.ServerError, "设置失败")
 		return
 	}
-	response.OKMsg(c, "ok")
+	c.JSON(http.StatusOK, response.Response{
+		Code:    response.SUCCESS,
+		Message: "设置成功",
+		Data:    result,
+		Success: true,
+	})
 }
 
 func (h *ConversationHandler) Delete(c *gin.Context) {

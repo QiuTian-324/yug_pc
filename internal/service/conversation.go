@@ -1,10 +1,12 @@
 package service
 
 import (
+	"errors"
+	"sort"
+
 	"FastGo/internal/global"
 	"FastGo/internal/handler/dto"
 	"FastGo/internal/model"
-	"sort"
 
 	"gorm.io/gorm"
 )
@@ -12,6 +14,8 @@ import (
 type ConversationService struct {
 	DB *gorm.DB
 }
+
+var ErrConversationNotFound = errors.New("会话不存在")
 
 func NewConversationService() *ConversationService {
 	return &ConversationService{DB: global.GetDB()}
@@ -76,14 +80,15 @@ func (s *ConversationService) List(userID uint) ([]dto.ConversationVO, error) {
 	list := make([]dto.ConversationVO, 0, len(convs))
 	for _, c := range convs {
 		vo := dto.ConversationVO{
-			ID:          c.ID,
-			TargetID:    c.TargetID,
-			TargetType:  c.TargetType,
-			LastMessage: c.LastMessage,
-			LastTime:    c.LastTime,
-			UnreadCount: c.UnreadCount,
-			IsPinned:    c.IsPinned,
-			IsMuted:     c.IsMuted,
+			ID:           c.ID,
+			TargetID:     c.TargetID,
+			TargetType:   c.TargetType,
+			LastMessage:  c.LastMessage,
+			LastSequence: c.LastSequence,
+			LastTime:     c.LastTime,
+			UnreadCount:  c.UnreadCount,
+			IsPinned:     c.IsPinned,
+			IsMuted:      c.IsMuted,
 		}
 		if c.TargetType == 1 {
 			if p, ok := singleMap[c.TargetID]; ok {
@@ -144,20 +149,40 @@ func (s *ConversationService) ClearUnread(userID uint, req dto.ConversationTarge
 }
 
 // SetPinMute 设置置顶/免打扰，只更新显式传入的字段
-func (s *ConversationService) SetPinMute(userID uint, req dto.SetPinMuteReq) error {
+func (s *ConversationService) SetPinMute(userID uint, req dto.SetPinMuteReq) (*dto.ConversationPinMuteVO, error) {
+	if req.IsPinned == nil && req.IsMuted == nil {
+		return nil, errors.New("is_pinned 或 is_muted 至少需要传一个")
+	}
+
+	var conv model.Conversation
+	err := s.DB.Where("user_id = ? AND target_id = ? AND target_type = ?",
+		userID, req.TargetID, req.TargetType).First(&conv).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrConversationNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
 	upd := map[string]any{}
 	if req.IsPinned != nil {
 		upd["is_pinned"] = *req.IsPinned
+		conv.IsPinned = *req.IsPinned
 	}
 	if req.IsMuted != nil {
 		upd["is_muted"] = *req.IsMuted
+		conv.IsMuted = *req.IsMuted
 	}
-	if len(upd) == 0 {
-		return nil
+	if err := s.DB.Model(&conv).Updates(upd).Error; err != nil {
+		return nil, err
 	}
-	return s.DB.Model(&model.Conversation{}).
-		Where("user_id = ? AND target_id = ? AND target_type = ?",
-			userID, req.TargetID, req.TargetType).Updates(upd).Error
+
+	return &dto.ConversationPinMuteVO{
+		TargetID:   conv.TargetID,
+		TargetType: conv.TargetType,
+		IsPinned:   conv.IsPinned,
+		IsMuted:    conv.IsMuted,
+	}, nil
 }
 
 // Delete 删除本用户的会话记录（不影响对方）

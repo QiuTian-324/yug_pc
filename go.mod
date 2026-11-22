@@ -5,6 +5,7 @@ go 1.23.2
 require (
 	github.com/go-playground/validator/v10 v10.20.0
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/viper v1.19.0
 	golang.org/x/crypto v0.23.0
 )

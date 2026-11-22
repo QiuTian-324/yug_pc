@@ -11,4 +11,7 @@ func RegisterFrontendRoutes(registry *router.RouteRegistry) {
 	// 注册会话模块的路由
 	conversationHandler := NewConversationHandler()
 	conversationHandler.RegisterRoutes(registry)
+
+	messageHandler := NewMessageHandler()
+	messageHandler.RegisterRoutes(registry)
 }
