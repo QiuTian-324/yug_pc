@@ -28,8 +28,9 @@ const (
 
 type MessageHandler struct {
 	*handler.CommonHandler
-	MessageService *service.MessageService
-	Hub            *realtime.Hub
+	MessageService  *service.MessageService
+	PresenceService *service.PresenceService
+	Hub             *realtime.Hub
 }
 
 type webSocketTicket struct {
@@ -38,10 +39,18 @@ type webSocketTicket struct {
 }
 
 func NewMessageHandler() *MessageHandler {
+	hub := realtime.NewHub()
+	presenceService := service.NewPresenceService(hub)
+	hub.SetConnectionChangeHandler(presenceService.OnConnectionChanged)
+	return NewMessageHandlerWithPresence(hub, presenceService)
+}
+
+func NewMessageHandlerWithPresence(hub *realtime.Hub, presenceService *service.PresenceService) *MessageHandler {
 	return &MessageHandler{
-		CommonHandler:  handler.NewCommonHandler(),
-		MessageService: service.NewMessageService(),
-		Hub:            realtime.NewHub(),
+		CommonHandler:   handler.NewCommonHandler(),
+		MessageService:  service.NewMessageService(),
+		PresenceService: presenceService,
+		Hub:             hub,
 	}
 }
 
@@ -173,7 +182,7 @@ func (h *MessageHandler) handleWebSocketMessage(client *realtime.Client, payload
 		h.sendWebSocketError(client, envelope.RequestID, response.InvalidParams, "消息参数格式错误")
 		return
 	}
-	message, created, err := h.MessageService.SendDirectText(client.UserID, req)
+	message, created, err := h.MessageService.SendDirectMessage(client.UserID, req)
 	if err != nil {
 		code, messageText := messageError(err)
 		h.sendWebSocketError(client, envelope.RequestID, code, messageText)
@@ -221,6 +230,8 @@ func messageError(err error) (int, string) {
 		return response.InvalidParams, err.Error()
 	case errors.Is(err, service.ErrClientMessageIDConflict):
 		return response.InvalidParams, err.Error()
+	case errors.Is(err, service.ErrFileNotFound):
+		return response.NotFound, err.Error()
 	case errors.Is(err, service.ErrMessageUserNotFound):
 		return response.NotFound, err.Error()
 	case errors.Is(err, service.ErrMessageNotFriend), errors.Is(err, service.ErrMessageBlocked):

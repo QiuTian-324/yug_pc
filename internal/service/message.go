@@ -40,12 +40,19 @@ func NewMessageService() *MessageService {
 	return &MessageService{DB: global.GetDB()}
 }
 
-// SendDirectText persists a direct text message before returning it for delivery.
-func (s *MessageService) SendDirectText(senderID uint, req dto.SendMessageRequest) (*dto.MessageVO, bool, error) {
+// SendDirectMessage persists a direct message before returning it for delivery.
+func (s *MessageService) SendDirectMessage(senderID uint, req dto.SendMessageRequest) (*dto.MessageVO, bool, error) {
 	if senderID == 0 || req.TargetID == 0 || senderID == req.TargetID ||
-		req.MessageType != model.MessageTypeText ||
-		strings.TrimSpace(req.ClientMsgID) == "" || len(req.ClientMsgID) > 64 ||
-		strings.TrimSpace(req.Content) == "" || utf8.RuneCountInString(req.Content) > maxTextRunes {
+		strings.TrimSpace(req.ClientMsgID) == "" || len(req.ClientMsgID) > 64 {
+		return nil, false, ErrInvalidMessage
+	}
+	if req.MessageType == model.MessageTypeText {
+		if strings.TrimSpace(req.FileID) != "" ||
+			strings.TrimSpace(req.Content) == "" || utf8.RuneCountInString(req.Content) > maxTextRunes {
+			return nil, false, ErrInvalidMessage
+		}
+	} else if (req.MessageType != model.MessageTypeImage && req.MessageType != model.MessageTypeFile) ||
+		strings.TrimSpace(req.FileID) == "" || strings.TrimSpace(req.Content) != "" {
 		return nil, false, ErrInvalidMessage
 	}
 
@@ -55,9 +62,28 @@ func (s *MessageService) SendDirectText(senderID uint, req dto.SendMessageReques
 	created := false
 
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		messageContent := req.Content
+		if req.MessageType != model.MessageTypeText {
+			var file model.File
+			if err := tx.Where("id = ? AND uploader_id = ?", req.FileID, senderID).First(&file).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrFileNotFound
+				}
+				return err
+			}
+			if MessageTypeForFile(file) != req.MessageType {
+				return ErrInvalidMessage
+			}
+			var err error
+			messageContent, err = FileMessageContent(file)
+			if err != nil {
+				return err
+			}
+		}
+
 		existing, err := findMessageByClientID(tx, senderID, clientMsgID)
 		if err == nil {
-			if !sameMessagePayload(existing, convKey, req.TargetID, req.Content) {
+			if !sameMessagePayload(existing, convKey, req.TargetID, req.MessageType, messageContent) {
 				return ErrClientMessageIDConflict
 			}
 			saved = existing
@@ -95,8 +121,8 @@ func (s *MessageService) SendDirectText(senderID uint, req dto.SendMessageReques
 			Sequence:       sequence,
 			SenderID:       senderID,
 			ReceiverID:     req.TargetID,
-			Type:           model.MessageTypeText,
-			Content:        req.Content,
+			Type:           req.MessageType,
+			Content:        messageContent,
 			SenderNickname: sender.Nickname,
 			SenderAvatar:   sender.Avatar,
 			Status:         1,
@@ -135,7 +161,22 @@ func (s *MessageService) SendDirectText(senderID uint, req dto.SendMessageReques
 		// transaction is inserting. Resolve it as an idempotent retry.
 		existing, lookupErr := findMessageByClientID(s.DB, senderID, clientMsgID)
 		if lookupErr == nil {
-			if sameMessagePayload(existing, convKey, req.TargetID, req.Content) {
+			expectedContent := req.Content
+			if req.MessageType != model.MessageTypeText {
+				var file model.File
+				fileErr := s.DB.Where("id = ? AND uploader_id = ?", req.FileID, senderID).First(&file).Error
+				if fileErr != nil {
+					return nil, false, fileErr
+				}
+				if MessageTypeForFile(file) != req.MessageType {
+					return nil, false, ErrInvalidMessage
+				}
+				expectedContent, fileErr = FileMessageContent(file)
+				if fileErr != nil {
+					return nil, false, fileErr
+				}
+			}
+			if sameMessagePayload(existing, convKey, req.TargetID, req.MessageType, expectedContent) {
 				result := messageToVO(existing)
 				return &result, false, nil
 			}
@@ -298,7 +339,7 @@ func touchConversationTx(tx *gorm.DB, userID, targetID uint, message model.Messa
 	if message.Sequence > conversation.LastSequence {
 		updates["last_message_id"] = message.ID
 		updates["last_sequence"] = message.Sequence
-		updates["last_message"] = messagePreview(message.Content)
+		updates["last_message"] = messagePreview(message)
 		updates["last_time"] = message.CreatedAt.UnixMilli()
 	}
 	if incrementUnread {
@@ -335,10 +376,10 @@ func findMessageByClientID(db *gorm.DB, senderID uint, clientMsgID string) (mode
 	return message, err
 }
 
-func sameMessagePayload(message model.Message, convKey string, targetID uint, content string) bool {
+func sameMessagePayload(message model.Message, convKey string, targetID uint, messageType uint8, content string) bool {
 	return message.ConvKey == convKey &&
 		message.ReceiverID == targetID &&
-		message.Type == model.MessageTypeText &&
+		message.Type == messageType &&
 		message.Content == content
 }
 
@@ -349,12 +390,18 @@ func directConvKey(userA, userB uint) string {
 	return fmt.Sprintf("1_%d_%d", userA, userB)
 }
 
-func messagePreview(content string) string {
-	runes := []rune(content)
+func messagePreview(message model.Message) string {
+	switch message.Type {
+	case model.MessageTypeImage:
+		return "[图片]"
+	case model.MessageTypeFile:
+		return "[文件]"
+	}
+	runes := []rune(message.Content)
 	if len(runes) > 100 {
 		return string(runes[:100])
 	}
-	return content
+	return message.Content
 }
 
 func messageToVO(message model.Message) dto.MessageVO {

@@ -10,6 +10,7 @@ import (
 	"FastGo/internal/model"
 	"FastGo/utils"
 
+	mysqlDriver "github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -22,6 +23,9 @@ var ErrCannotSearchSelf = errors.New("不能搜索自己")
 
 var ErrFriendRequestNotFound = errors.New("好友申请不存在")
 var ErrFriendRequestNotPending = errors.New("好友申请已处理")
+var ErrUsernameAlreadyExists = errors.New("用户名已存在")
+var ErrInvalidBirthday = errors.New("生日格式无效或不能晚于今天")
+var ErrInvalidRegisterRequest = errors.New("用户名和昵称不能为空")
 
 // UserService 提供用户登录相关的业务逻辑
 type UserService struct {
@@ -31,6 +35,49 @@ type UserService struct {
 // NewUserService 创建一个新的 UserService 实例
 func NewUserService() *UserService {
 	return &UserService{DB: global.GetDB()}
+}
+
+func (s *UserService) Register(req *dto.RegisterRequest) error {
+	username := strings.TrimSpace(req.Username)
+	nickname := strings.TrimSpace(req.Nickname)
+	if username == "" || nickname == "" {
+		return ErrInvalidRegisterRequest
+	}
+
+	birthday, err := time.Parse("2006-01-02", req.Birthday)
+	if err != nil || req.Birthday > time.Now().Format("2006-01-02") {
+		return ErrInvalidBirthday
+	}
+
+	var count int64
+	if err := s.DB.Model(&model.User{}).Where("username = ?", username).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return ErrUsernameAlreadyExists
+	}
+
+	hashedPassword, err := utils.HashPassword(req.Password)
+	if err != nil {
+		return err
+	}
+	gender := req.Gender
+	user := model.User{
+		Username:     username,
+		Password:     hashedPassword,
+		Nickname:     nickname,
+		Gender:       &gender,
+		Birthday:     &birthday,
+		PresenceMode: model.PresenceModeOnline,
+	}
+	if err := s.DB.Create(&user).Error; err != nil {
+		var mysqlErr *mysqlDriver.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+			return ErrUsernameAlreadyExists
+		}
+		return err
+	}
+	return nil
 }
 
 // service/login.go —— 不再接收 gin.Context，入参用 *dto.LoginRequest

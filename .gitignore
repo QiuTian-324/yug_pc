@@ -5,3 +5,4 @@ config/config.yaml
 config/config.yaml.example
 
 storage/logs/*
+uploads/

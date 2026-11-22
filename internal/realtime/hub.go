@@ -17,8 +17,9 @@ const (
 )
 
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[uint]map[*Client]struct{}
+	mu                 sync.RWMutex
+	clients            map[uint]map[*Client]struct{}
+	onConnectionChange func(uint)
 }
 
 type Client struct {
@@ -34,6 +35,12 @@ func NewHub() *Hub {
 	return &Hub{clients: make(map[uint]map[*Client]struct{})}
 }
 
+func (h *Hub) SetConnectionChangeHandler(handler func(uint)) {
+	h.mu.Lock()
+	h.onConnectionChange = handler
+	h.mu.Unlock()
+}
+
 func (h *Hub) Register(userID uint, conn *websocket.Conn) *Client {
 	client := &Client{
 		UserID: userID,
@@ -44,24 +51,60 @@ func (h *Hub) Register(userID uint, conn *websocket.Conn) *Client {
 	}
 
 	h.mu.Lock()
+	firstConnection := len(h.clients[userID]) == 0
 	if h.clients[userID] == nil {
 		h.clients[userID] = make(map[*Client]struct{})
 	}
 	h.clients[userID][client] = struct{}{}
+	onConnectionChange := h.onConnectionChange
 	h.mu.Unlock()
+
+	if firstConnection && onConnectionChange != nil {
+		go onConnectionChange(userID)
+	}
 	return client
 }
 
 func (h *Hub) Unregister(client *Client) {
 	h.mu.Lock()
+	removed := false
+	lastConnection := false
 	if clients, ok := h.clients[client.UserID]; ok {
-		delete(clients, client)
-		if len(clients) == 0 {
+		if _, exists := clients[client]; exists {
+			delete(clients, client)
+			removed = true
+		}
+		if removed && len(clients) == 0 {
 			delete(h.clients, client.UserID)
+			lastConnection = true
 		}
 	}
+	onConnectionChange := h.onConnectionChange
 	h.mu.Unlock()
 	client.close()
+
+	if lastConnection && onConnectionChange != nil {
+		go onConnectionChange(client.UserID)
+	}
+}
+
+func (h *Hub) IsOnline(userID uint) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients[userID]) > 0
+}
+
+func (h *Hub) OnlineUserIDs() map[uint]struct{} {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	online := make(map[uint]struct{}, len(h.clients))
+	for userID, clients := range h.clients {
+		if len(clients) > 0 {
+			online[userID] = struct{}{}
+		}
+	}
+	return online
 }
 
 func (h *Hub) SendToUser(userID uint, except *Client, event any) error {

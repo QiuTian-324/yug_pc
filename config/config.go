@@ -10,6 +10,7 @@ import (
 
 type Options struct {
 	Srv   ServerOptions `mapstructure:"server"`
+	File  FileOptions   `mapstructure:"file"`
 	MySQL MySQLOptions  `mapstructure:"mysql"`
 	Redis RedisOptions  `mapstructure:"redis"`
 	Log   LogConfig     `mapstructure:"log"`
@@ -19,6 +20,11 @@ type Options struct {
 type ServerOptions struct {
 	Port int    `mapstructure:"port"`
 	Mode string `mapstructure:"mode"`
+}
+
+// 文件配置
+type FileOptions struct {
+	Upload_dir string `mapstructure:"upload_dir"`
 }
 
 func New() (*Options, error) {

@@ -2,7 +2,14 @@ package model
 
 import "time"
 
-const MessageTypeText uint8 = 1
+const (
+	MessageTypeText   uint8 = 1
+	MessageTypeImage  uint8 = 2
+	MessageTypeVoice  uint8 = 3
+	MessageTypeFile   uint8 = 4
+	MessageTypeSystem uint8 = 5
+	MessageTypeRecall uint8 = 6
+)
 
 // 消息
 type Message struct {

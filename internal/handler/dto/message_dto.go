@@ -10,6 +10,7 @@ type SendMessageRequest struct {
 	ClientMsgID string `json:"client_msg_id"`
 	MessageType uint8  `json:"message_type"`
 	Content     string `json:"content"`
+	FileID      string `json:"file_id,omitempty"`
 }
 
 type MessageHistoryRequest struct {

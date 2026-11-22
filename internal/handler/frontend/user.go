@@ -2,17 +2,19 @@ package frontend
 
 import (
 	"errors"
+	"net/http"
+	"time"
 
 	"FastGo/internal/global"
 	"FastGo/internal/handler"
 	"FastGo/internal/handler/dto"
 	"FastGo/internal/model"
+	"FastGo/internal/realtime"
 	"FastGo/internal/router"
 	"FastGo/internal/service"
 	"FastGo/pkg/jwt"
 	"FastGo/pkg/response"
 	"FastGo/pkg/validator"
-	"FastGo/utils"
 
 	"github.com/gin-gonic/gin"
 )
@@ -20,14 +22,23 @@ import (
 // UserHandler 处理用户相关的请求
 type UserHandler struct {
 	*handler.CommonHandler
-	UserService *service.UserService
+	UserService     *service.UserService
+	PresenceService *service.PresenceService
 }
 
 // NewUserHandler 创建并返回一个 UserHandler 实例
 func NewUserHandler() *UserHandler {
+	hub := realtime.NewHub()
+	presenceService := service.NewPresenceService(hub)
+	hub.SetConnectionChangeHandler(presenceService.OnConnectionChanged)
+	return NewUserHandlerWithPresence(presenceService)
+}
+
+func NewUserHandlerWithPresence(presenceService *service.PresenceService) *UserHandler {
 	return &UserHandler{
-		CommonHandler: handler.NewCommonHandler(),
-		UserService:   service.NewUserService(),
+		CommonHandler:   handler.NewCommonHandler(),
+		UserService:     service.NewUserService(),
+		PresenceService: presenceService,
 	}
 }
 
@@ -36,6 +47,7 @@ func (h *UserHandler) RegisterRoutes(registry *router.RouteRegistry) {
 	// 公开接口：保持 1（PUBLIC）
 	registry.Register("POST", "user", "/login", h.Login, jwt.PUBLIC, "用户登录")
 	registry.Register("POST", "user", "/register", h.Register, jwt.PUBLIC, "用户注册")
+	registry.Register("PUT", "user", "/presence", h.SetPresence, jwt.REQUIRE_AUTH, "设置在线状态")
 	// 需要认证的接口：保持 2（REQUIRE_AUTH）
 	// registry.Register("GET", "user", "/profile", h.Profile, jwt.REQUIRE_AUTH, "获取用户信息")
 	registry.Register("GET", "user", "/search", h.SearchUser, jwt.REQUIRE_AUTH, "按用户名搜索用户")
@@ -75,39 +87,39 @@ func (h *UserHandler) Login(c *gin.Context) {
 	response.OK(c, dto.LoginResponse{
 		Token: token,
 		UserInfo: dto.UserInfoVO{
-			ID:        user.ID,
-			Username:  user.Username,
-			Nickname:  user.Nickname,
-			Avatar:    user.Avatar,
-			Bio:       user.Bio,
-			CreatedAt: user.CreatedAt,
+			ID:           user.ID,
+			Username:     user.Username,
+			Nickname:     user.Nickname,
+			Gender:       user.Gender,
+			Birthday:     birthdayString(user.Birthday),
+			PresenceMode: presenceModeString(user.PresenceMode),
+			Avatar:       user.Avatar,
+			Bio:          user.Bio,
+			CreatedAt:    user.CreatedAt,
 		},
 	})
 }
 
 func (h *UserHandler) Register(c *gin.Context) {
-	var registerData struct {
-		Username string `json:"username" binding:"required,username"`
-		Password string `json:"password" binding:"required,password"`
-	}
-
-	if err := c.ShouldBindJSON(&registerData); err != nil {
+	var req dto.RegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		response.FailMsg(c, response.InvalidParams, validator.TranslateError(err))
 		return
 	}
 
-	hashedPassword, err := utils.HashPassword(registerData.Password)
-	if err != nil {
-		response.FailMsg(c, response.ServerError, "密码加密失败")
-		return
-	}
-
-	user := model.User{
-		Username: registerData.Username,
-		Password: hashedPassword,
-	}
-
-	if err := h.DB.Create(&user).Error; err != nil {
+	if err := h.UserService.Register(&req); err != nil {
+		if errors.Is(err, service.ErrUsernameAlreadyExists) {
+			response.FailMsg(c, response.UserExists, err.Error())
+			return
+		}
+		if errors.Is(err, service.ErrInvalidBirthday) {
+			response.FailMsg(c, response.InvalidParams, err.Error())
+			return
+		}
+		if errors.Is(err, service.ErrInvalidRegisterRequest) {
+			response.FailMsg(c, response.InvalidParams, err.Error())
+			return
+		}
 		response.FailMsg(c, response.ServerError, "注册失败")
 		return
 	}
@@ -153,15 +165,49 @@ func (h *UserHandler) FriendList(c *gin.Context) {
 		return
 	}
 
-	h.UserService.FriendList(userID, &req)
-
 	res, err := h.UserService.FriendList(userID, &req)
 	if err != nil {
 		response.FailMsg(c, response.ServerError, "获取好友列表失败")
 		return
 	}
 
+	friendIDs := make([]uint, 0, len(res.List))
+	for _, item := range res.List {
+		friendIDs = append(friendIDs, item.User.ID)
+	}
+	statuses, err := h.PresenceService.Statuses(friendIDs)
+	if err != nil {
+		response.FailMsg(c, response.ServerError, "获取好友在线状态失败")
+		return
+	}
+	for i := range res.List {
+		res.List[i].IsOnline = statuses[res.List[i].User.ID]
+	}
+
 	response.OK(c, res)
+}
+
+func (h *UserHandler) SetPresence(c *gin.Context) {
+	var req dto.SetPresenceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.FailMsg(c, response.InvalidParams, validator.TranslateError(err))
+		return
+	}
+	result, err := h.PresenceService.SetMode(c.GetUint("user_id"), req.Mode)
+	if errors.Is(err, service.ErrInvalidPresenceMode) {
+		response.FailMsg(c, response.InvalidParams, err.Error())
+		return
+	}
+	if err != nil {
+		response.FailMsg(c, response.ServerError, "设置在线状态失败")
+		return
+	}
+	c.JSON(http.StatusOK, response.Response{
+		Code:    response.SUCCESS,
+		Message: "设置成功",
+		Data:    result,
+		Success: true,
+	})
 }
 
 // SendFriendRequest 发起好友申请
@@ -238,4 +284,18 @@ func (h *UserHandler) handleFriendRequest(c *gin.Context, accept bool) {
 		return
 	}
 	response.OKMsg(c, "已拒绝好友申请")
+}
+
+func birthdayString(birthday *time.Time) string {
+	if birthday == nil {
+		return ""
+	}
+	return birthday.Format("2006-01-02")
+}
+
+func presenceModeString(mode uint8) string {
+	if mode == model.PresenceModeInvisible {
+		return "invisible"
+	}
+	return "online"
 }

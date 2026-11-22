@@ -71,6 +71,7 @@ type FriendItemVO struct {
 	Remark       string       `json:"remark"`
 	GroupID      uint         `json:"group_id"`
 	CreatedAt    time.Time    `json:"created_at"`
+	IsOnline     bool         `json:"is_online"`
 	User         FriendUserVO `json:"user"`
 }
 
@@ -90,12 +91,37 @@ type LoginResponse struct {
 
 // UserInfoVO 用户信息展示对象
 type UserInfoVO struct {
-	ID        uint      `json:"id"`
-	Username  string    `json:"username"`
-	Nickname  string    `json:"nickname"`
-	Avatar    string    `json:"avatar"`
-	Bio       string    `json:"bio"`
-	CreatedAt time.Time `json:"created_at"`
+	ID           uint      `json:"id"`
+	Username     string    `json:"username"`
+	Nickname     string    `json:"nickname"`
+	Gender       *uint8    `json:"gender,omitempty"`
+	Birthday     string    `json:"birthday,omitempty"`
+	PresenceMode string    `json:"presence_mode"`
+	Avatar       string    `json:"avatar"`
+	Bio          string    `json:"bio"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type RegisterRequest struct {
+	Username string `json:"username" binding:"required,username"`
+	Password string `json:"password" binding:"required,password"`
+	Nickname string `json:"nickname" binding:"required,max=100"`
+	Gender   uint8  `json:"gender" binding:"required,oneof=1 2"`
+	Birthday string `json:"birthday" binding:"required,date"`
+}
+
+type SetPresenceRequest struct {
+	Mode string `json:"mode" binding:"required,oneof=online invisible"`
+}
+
+type PresenceVO struct {
+	Mode     string `json:"mode"`
+	IsOnline bool   `json:"is_online"`
+}
+
+type PresenceChangedEvent struct {
+	UserID   uint `json:"user_id"`
+	IsOnline bool `json:"is_online"`
 }
 
 // 登录请求

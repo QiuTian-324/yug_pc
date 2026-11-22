@@ -3,13 +3,20 @@ package bootstrap
 import (
 	"FastGo/internal/global"
 	"FastGo/internal/model"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func (app *App) setupMySQL() error {
@@ -77,9 +84,15 @@ func Migrate() {
 		&model.ConversationStream{}, // 会话服务端消息序列表
 		&model.Conversation{},       //	会话表
 		&model.Message{},            //	消息表
+		&model.File{},               // 通用文件元数据
 	)
 	if err != nil {
 		global.Log.Error("数据库迁移失败", zap.Error(err))
+		return
+	}
+
+	if err := migrateLegacyMessageAttachments(db); err != nil {
+		global.Log.Error("迁移旧聊天附件失败", zap.Error(err))
 		return
 	}
 
@@ -88,6 +101,120 @@ func Migrate() {
 		return
 	}
 	global.Log.Info("数据库迁移成功")
+}
+
+type legacyMessageAttachment struct {
+	ID           string
+	UploaderID   uint
+	OriginalName string
+	StorageName  string
+	ContentType  string
+	Size         int64
+	CreatedAt    time.Time
+}
+
+func (legacyMessageAttachment) TableName() string {
+	return "message_attachments"
+}
+
+func migrateLegacyMessageAttachments(db *gorm.DB) error {
+	if !db.Migrator().HasTable("message_attachments") {
+		return nil
+	}
+
+	rootDir := strings.TrimSpace(os.Getenv("CHAT_UPLOAD_DIR"))
+	if rootDir == "" {
+		rootDir = filepath.Join("uploads", "chat")
+	}
+	rootDir, err := filepath.Abs(rootDir)
+	if err != nil {
+		return fmt.Errorf("解析旧附件目录失败: %w", err)
+	}
+
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var attachments []legacyMessageAttachment
+		if err := tx.Find(&attachments).Error; err != nil {
+			return err
+		}
+		for _, attachment := range attachments {
+			parsedID, parseErr := uuid.Parse(attachment.ID)
+			if parseErr != nil || parsedID.String() != attachment.ID || attachment.StorageName != attachment.ID {
+				return fmt.Errorf("旧附件 %q 的文件名无效", attachment.ID)
+			}
+			file := model.File{
+				ID:           attachment.ID,
+				UploaderID:   attachment.UploaderID,
+				OriginalName: attachment.OriginalName,
+				StorageName:  attachment.StorageName,
+				FilePath:     filepath.Join(rootDir, attachment.StorageName),
+				ContentType:  attachment.ContentType,
+				Size:         attachment.Size,
+				CreatedAt:    attachment.CreatedAt,
+			}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "id"}},
+				UpdateAll: true,
+			}).Create(&file).Error; err != nil {
+				return err
+			}
+		}
+
+		var lastID uint
+		for {
+			var messages []model.Message
+			if err := tx.Select("id, content").
+				Where("type IN ? AND id > ?", []uint8{model.MessageTypeImage, model.MessageTypeFile}, lastID).
+				Order("id ASC").Limit(500).Find(&messages).Error; err != nil {
+				return err
+			}
+			if len(messages) == 0 {
+				break
+			}
+			for _, message := range messages {
+				lastID = message.ID
+				var content map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(message.Content), &content); err != nil {
+					continue
+				}
+				var fileID string
+				if err := json.Unmarshal(content["attachment_id"], &fileID); err != nil || fileID == "" {
+					continue
+				}
+				var file model.File
+				if err := tx.Select("id", "original_name", "content_type", "size").
+					Where("id = ?", fileID).First(&file).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						continue
+					}
+					return err
+				}
+				fileIDJSON, _ := json.Marshal(file.ID)
+				urlJSON, _ := json.Marshal("/files/" + file.ID)
+				fileNameJSON, _ := json.Marshal(file.OriginalName)
+				contentTypeJSON, _ := json.Marshal(file.ContentType)
+				sizeJSON, _ := json.Marshal(file.Size)
+				delete(content, "attachment_id")
+				content["file_id"] = fileIDJSON
+				content["url"] = urlJSON
+				content["file_name"] = fileNameJSON
+				content["content_type"] = contentTypeJSON
+				content["size"] = sizeJSON
+				updated, err := json.Marshal(content)
+				if err != nil {
+					return err
+				}
+				if err := tx.Model(&model.Message{}).Where("id = ?", message.ID).
+					Update("content", string(updated)).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return db.Migrator().DropTable("message_attachments")
 }
 
 func backfillZeroSequenceMessages(db *gorm.DB) error {
