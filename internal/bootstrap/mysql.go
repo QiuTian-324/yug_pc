@@ -60,6 +60,8 @@ func Migrate() {
 		&model.Friendship{},    //	好友关系表
 		&model.Group{},         //	群组表
 		&model.GroupMember{},   //	群组成员表
+		&model.Notification{},       // 用户级好友和群组通知表
+		&model.SystemAnnouncement{}, // 全员系统公告表
 		&model.Conversation{},  //	会话表
 		&model.Message{},       //	消息表
 	)
